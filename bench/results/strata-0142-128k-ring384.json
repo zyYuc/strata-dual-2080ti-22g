@@ -1,0 +1,16 @@
+[
+  {
+    "status": 200,
+    "prompt_tokens": 133080,
+    "completion_tokens": 605,
+    "completion_tokens_details": null,
+    "reasoning_chars": 2374,
+    "answer_chars": 831,
+    "ttft_s": 61.529,
+    "total_s": 70.081,
+    "prefill_tok_s": 2162.9,
+    "decode_tok_s": 70.7,
+    "target_words": 128000,
+    "run": 1
+  }
+]
