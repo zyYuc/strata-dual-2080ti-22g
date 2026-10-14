@@ -1,7 +1,7 @@
 # Strata 双 RTX 2080 Ti 22G 调优配置 · Qwen3.8-Flash-Next (Swift IQ3_XXS)
 
-> 双卡层切分 + 262K 上下文 + MTP 投机解码，**60K prefill 2116 tok/s / 128K 2163 tok/s / decode ~77-84 tok/s**（48 GB 内存消费级平台）。
-> 引擎 Strata v0.1.42，全部数字为本机实测（`bench/` 有全部原始 JSON），口径见下。
+> 双卡层切分 + 262K 上下文 + MTP 投机解码，**60K prefill 2131 tok/s / 128K 2193 tok/s / decode ~76-84 tok/s**（48 GB 内存消费级平台）。
+> 引擎 Strata **v0.1.44.1**，全部数字为本机实测（`bench/` 有全部原始 JSON），口径见下。
 
 ## 硬件
 
@@ -31,13 +31,15 @@
   "STRATA_SPLIT_MTP_BATCH": "1",
   "STRATA_SPLIT_RING": "384",
   "STRATA_SPLIT_OWN": "0",        // 显式借用；不设会 auto 切 own 改变驻留行为
-  "STRATA_STAGE_TRIM": "1",       // 0.1.42 上 2K prefill 承重墙（删则 -19%）
-  "STRATA_PREFILL_HELP": "1",     // CPU 协助 1-3.3K prompt MMQ（同上）
+  "STRATA_STAGE_TRIM": "1",       // 2K prefill 承重墙（删则 -19%）
+  "STRATA_PREFILL_HELP": "1",     // CPU 协助 ≤3.3K prompt（超过 3.3K 自动失效，见下）
   "STRATA_DEBUG": "1"             // 可选，调试日志
 }
 ```
 
-注：`STRATA_ROUTE_TAIL_SKIP` 不设 = 0.1.42 默认开（本机 77% 驻留下中性；会轻微改变输出，逐字复现旧版设 0）。
+注：`STRATA_ROUTE_TAIL_SKIP` 不设 = 0.1.42 起默认开（本机 77% 驻留下中性；会轻微改变输出，逐字复现旧版设 0）。
+
+**`STRATA_PREFILL_HELP` 的真实作用域（源码核实）**：`prefill.cpp` 的 `split_help_frac()` 规则是 `min(0.45, 0.5 - T/16384)`，低于 0.3 时返回 0 —— 即 **chunk ≥ 3277 token 时该开关自动失效**。本机 `--prefill auto` 用 8192 chunk，所以它只在 ≤3.3K 的短 prompt 上工作（这正好解释了它 2K 档 +36% 而长档持平/略负的实测）。若想在长档强制启用需设 `STRATA_PREFILL_HELP_FRAC=<0..1>`（本仓库未测，留作待验证项）。
 
 ## 关键加载参数
 
@@ -51,20 +53,37 @@
 
 完整 config 见 [`config/strata-swift-iq3_xxs.example.json`](config/strata-swift-iq3_xxs.example.json)。
 
-**注意 `--prefill auto` 保持 8192**：`auto:16384` 在 48 GB 内存上三个引擎版本实测 20K prefill -19~23%（92 GB 全锁页机器才扛得住）；`--kv-resident 32768` 同理（decode -6~9%，decode 受主机侧专家流带宽约束）。
+**注意 `--prefill auto` 必须保持 8192**：`auto:16384` / `auto:32768` 在 48 GB 内存上会把机器打到内存 thrash（详见下方"内存安全红线"）；`--kv-resident 32768` 同理（decode -6~9%，decode 受主机侧专家流带宽约束）。
 
-## 实测结果（五档 ×2 + 128K 单发）
+## 实测结果（v0.1.44.1，五档 ×2 + 128K）
 
-| 档位 | prompt tokens | prefill tok/s（均值） | decode tok/s | TTFT |
-|---|---|---|---|---|
-| 2K | 2124 | 665 | ~80 | 2.9-3.5 s |
-| 5K | 5216 | 1010 | 80.3 | 5.1-5.2 s |
-| 8K | 8355 | 1095 | 83.4 | 7.6-7.7 s |
-| 20K | 20849 | 1706 | 75.7 | 12.2-12.3 s |
-| 60K | 62420 | **2116** | 76.5 | 29.3-29.7 s |
-| 128K | 133080 | **2163** | 70.7 | 61.5 s |
+| 档位 | prompt tokens | prefill tok/s（两 run） | 均值 | decode tok/s | TTFT |
+|---|---|---|---|---|---|
+| 2K | 2122 | 672 / 768 | 720 | 78.3 | 3.16 / 2.76 s |
+| 5K | 5222 | 1056 / 1058 | 1057 | 79.0 | 4.94 / 4.94 s |
+| 8K | 8340 | 1122 / 1113 | 1118 | 81.7 | 7.45 / 7.48 s |
+| 20K | 20846 | 1705 / 1710 | 1708 | 78.4 | 12.23 / 12.19 s |
+| 60K | 62388 | 2160 / 2102 | **2131** | 72.6 | 28.90 / 29.66 s |
+| 128K | 132992 | 2226 / 2160 | **2193** | 73.5 | 59.78 / 61.54 s |
 
-对 0.1.41 原配置的累计提升：5K +6.7% / 8K +11.6% / 20K +14.5% / 60K +16.3% / 128K +22.8%，decode 持平略升。
+原始数据：[`bench/results/01441/strata-01441-baseline-5tier.json`](bench/results/01441/strata-01441-baseline-5tier.json)、128K 见 [`bench/results/01441/`](bench/results/01441/)。
+
+## 版本演进（0.1.42 → 0.1.44.1）
+
+同一硬件、同一 config、纯升级引擎（源码编译 sm_75/CUDA 13.0）：
+
+| 档位 | 0.1.42 | 0.1.44.1 | 变化 |
+|---|---|---|---|
+| 2K | 665 | 720 | **+8.3%** |
+| 5K | 1010 | 1057 | **+4.7%** |
+| 8K | 1095 | 1118 | **+2.0%** |
+| 20K | 1699 | 1708 | +0.5% |
+| 60K | 2114 | 2131 | +0.8% |
+| 128K | 2163 | 2193 | +1.4% |
+
+短 prompt 受益最明显（0.1.43.1 修了 prompt 路径的若干调度问题），长档基本持平。
+**升级注意**：0.1.44 把 setup 的默认量化从 IQ3_XXS 换成了 IQ3_S（慢 10-15%、多吃约 7 GB RAM），
+0.1.44.1 才修复"重跑 setup 保持已装尺寸"。手写 config 的用户升级时务必核对模型文件未被替换。
 
 ## 测速口径
 
@@ -76,7 +95,36 @@ python3 bench/run_context_ttft_fair.py --base-url http://<host>:8000 \
   --runs 2 --max-tokens 1024 --output bench/results/your-run.json
 ```
 
+**筛选建议用 128K 单档**：prefill 速率随 context 单调爬升（2K 720 → 60K 2131 → 128K 2193），
+60K 时仍在上升段、区分度不足；128K 才是判别档。run 间噪声约 ±3%，小于 3% 的差异需多轮才能判定。
+
 ## 已测否决（别重复踩）
+
+### 内存安全红线（重要）
+
+| 候选 | 结果 |
+|---|---|
+| `STRATA_PREFILL_AUTO_MAX=16384` / `=32768` | **128K prompt 下把 48 GB 机器打到内存 thrash、sshd 失联、需硬重启**（两次实测）。48 GB 平台绝对不要碰：大 chunk 的借槽需求会把 pinned 内存 + 借槽区域一起撑爆。92 GB 级全锁页机器专属。 |
+
+引擎每轮启动会分配 ~17.4 GiB **page-locked** 内存（`free` 里显示为 `shared`，不计入 `used`），
+128K 请求再叠加 prompt buffer + 4934 借槽。**监控内存时不能只看 `available`，必须同时看 `shared` 与 `MemAvailable`**；
+`shared` 持续接近总内存即处于危险区。
+
+### 128K 实测无增益（v0.1.44.1，mean of 2）
+
+| 候选 | 128K prefill | vs base 2193 |
+|---|---|---|
+| `STRATA_PREFILL_LEND_PCT=95` | 2175 | −0.8% |
+| `STRATA_PREFILL_LEND_PCT=100` | 2167 | −1.2% |
+| `STRATA_SPLIT_RING=512` | 2151 | −1.9% |
+| `STRATA_SPLIT_RING=768` | 2153 | −1.8% |
+| `STRATA_PREFILL_STREAM_AHEAD=0` | 2186 | −0.3% |
+| `STRATA_PREFILL_GROUP_GATHER=0` | 2171 | −1.0% |
+| `STRATA_PREFILL_ISSUER=0` | 2166 | −1.2% |
+
+**本机 77% 驻留 + 满覆盖（零文件读）的栈上，这 7 个调度类开关全部无增益或略负** —— 现有配置已接近该引擎版本在此硬件上的稳态上限。
+
+### 早期否决（0.1.42 及以前）
 
 | 候选 | 结果 |
 |---|---|
@@ -85,10 +133,18 @@ python3 bench/run_context_ttft_fair.py --base-url http://<host>:8000 \
 | `--pool-workers 5`（calibrate 推荐） | prefill -7%，decode 噪声内 |
 | calibrate 写回的其余组合 | 短 prompt 口径调优，本机全档变差，须本机复测裁决 |
 | `STRATA_ROUTE_RESIDENT/PRIOR=0.5` | 满覆盖栈上中性，且改输出（KL ~0.0085） |
+| `--peer-device` | ≤20K 最快但 60K 退 20%（NV2 半速 NVLink），本机不上线 |
+
+## 待验证项
+
+- `STRATA_PREFILL_HELP_FRAC=0.2~0.3`：强制让 split-help 在 8192 chunk 上工作（默认在 ≥3277 token 时关闭）。有理论依据，但未实测。
+- `STRATA_MMQ_RESIDENT_SORT_NE=1`：要求"该层专家全部驻留"，本机 77% 驻留不满足前置条件。
+- 96 GB 内存路径：60K/128K 的残余瓶颈是内存容量（page cache 与专家工作集无余量），未验证。
 
 ## 复现要点
 
-1. 引擎 ≥ v0.1.42（借槽 RAM 备份是 0.1.42 双卡新特性），源码编译 `sm_75`。
+1. 引擎 ≥ v0.1.44.1，源码编译 `sm_75`（`-DCMAKE_CUDA_ARCHITECTURES=75`），vision 引擎需单独构建（`cmake -S tools/vision -B build-vision -DSTRATA_VISION_CUDA=ON -DSTRATA_PORTABLE=OFF`）。
 2. 启动日志验收：`FileExpertSource: the split stages lend N slots: N keep their experts in RAM too`（M=N 满覆盖）、`mapped pinned cache complement ready: resident 16-17 GiB`、`layer split: 77% of the experts resident`。
 3. 显存两卡应 ~96% 占满（auto 每卡留 700 MiB），内存补集 16-17 GiB 锁页。
 4. 200W 功耗墙（改装卡散热优先）——250W 曾测得 +3~5%，自担风险。
+5. **测试纪律**：每个 A/B 条件跑完后先查 `free -g`（重点看 `shared`）与服务存活，再开下一个；改 config 后**立即 restart**，不留带毒配置窗口。

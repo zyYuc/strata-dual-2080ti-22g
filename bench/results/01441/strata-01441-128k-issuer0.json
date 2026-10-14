@@ -1,0 +1,30 @@
+[
+  {
+    "status": 200,
+    "prompt_tokens": 133080,
+    "completion_tokens": 791,
+    "completion_tokens_details": null,
+    "reasoning_chars": 2180,
+    "answer_chars": 1403,
+    "ttft_s": 60.647,
+    "total_s": 70.457,
+    "prefill_tok_s": 2194.3,
+    "decode_tok_s": 80.6,
+    "target_words": 128000,
+    "run": 1
+  },
+  {
+    "status": 200,
+    "prompt_tokens": 132903,
+    "completion_tokens": 509,
+    "completion_tokens_details": null,
+    "reasoning_chars": 1838,
+    "answer_chars": 1038,
+    "ttft_s": 62.19,
+    "total_s": 69.364,
+    "prefill_tok_s": 2137.0,
+    "decode_tok_s": 71.0,
+    "target_words": 128000,
+    "run": 2
+  }
+]
